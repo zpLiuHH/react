@@ -12,7 +12,8 @@
 let React;
 let ReactFeatureFlags;
 let ReactDOM;
-let Drag;
+let useDragResponder;
+
 describe('Drag event responder', () => {
   let container;
 
@@ -22,7 +23,7 @@ describe('Drag event responder', () => {
     ReactFeatureFlags.enableFlareAPI = true;
     React = require('react');
     ReactDOM = require('react-dom');
-    Drag = require('react-events/drag').Drag;
+    useDragResponder = require('react-events/drag').useDragResponder;
 
     container = document.createElement('div');
     document.body.appendChild(container);
@@ -43,10 +44,13 @@ describe('Drag event responder', () => {
     }
 
     function Component() {
+      const listener = useDragResponder({
+        onDragChange: handleOnDrag,
+      });
       return (
-        <Drag onDragChange={handleOnDrag}>
-          <div ref={divRef}>Drag me!</div>
-        </Drag>
+        <div ref={divRef} listeners={listener}>
+          Drag me!
+        </div>
       );
     }
 
@@ -96,10 +100,69 @@ describe('Drag event responder', () => {
     }
 
     function Component() {
+      const listener = useDragResponder({
+        onDragStart: handleDragStart,
+        onDragEnd: handleDragEnd,
+      });
       return (
-        <Drag onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
-          <div ref={divRef}>Drag me!</div>
-        </Drag>
+        <div ref={divRef} listeners={listener}>
+          Drag me!
+        </div>
+      );
+    }
+
+    ReactDOM.render(<Component />, container);
+
+    const mouseOverEvent = document.createEvent('MouseEvents');
+    mouseOverEvent.initEvent('mousedown', true, true);
+    divRef.current.dispatchEvent(mouseOverEvent);
+
+    const mouseMoveEvent = document.createEvent('MouseEvents');
+    for (let index = 0; index <= 20; index++) {
+      mouseMoveEvent.initMouseEvent(
+        'mousemove',
+        true,
+        true,
+        window,
+        1,
+        index,
+        index,
+        50,
+        50,
+      );
+      divRef.current.dispatchEvent(mouseMoveEvent);
+    }
+    divRef.current.dispatchEvent(mouseMoveEvent);
+
+    const mouseUpEvent = document.createEvent('MouseEvents');
+    mouseUpEvent.initEvent('mouseup', true, true);
+    divRef.current.dispatchEvent(mouseUpEvent);
+
+    expect(events).toEqual(['dragstart', 'dragend']);
+  });
+
+  it('should support onDragStart and onDragEnd with ownership', () => {
+    let divRef = React.createRef();
+    let events = [];
+
+    function handleDragStart() {
+      events.push('dragstart');
+    }
+
+    function handleDragEnd() {
+      events.push('dragend');
+    }
+
+    function Component() {
+      const listener = useDragResponder({
+        onDragStart: handleDragStart,
+        onDragEnd: handleDragEnd,
+        shouldClaimOwnership: () => true,
+      });
+      return (
+        <div ref={divRef} listeners={listener}>
+          Drag me!
+        </div>
       );
     }
 
@@ -145,10 +208,13 @@ describe('Drag event responder', () => {
     }
 
     function Component() {
+      const listener = useDragResponder({
+        onDragMove: handleDragMove,
+      });
       return (
-        <Drag onDragMove={handleDragMove}>
-          <div ref={divRef}>Drag me!</div>
-        </Drag>
+        <div ref={divRef} listeners={listener}>
+          Drag me!
+        </div>
       );
     }
 

@@ -16,6 +16,7 @@ import type {
   Container,
   PublicInstance,
 } from './ReactFiberHostConfig';
+import {FundamentalComponent} from 'shared/ReactWorkTags';
 import type {ReactNodeList} from 'shared/ReactTypes';
 import type {ExpirationTime} from './ReactFiberExpirationTime';
 import type {SuspenseConfig} from './ReactFiberSuspenseConfig';
@@ -57,6 +58,7 @@ import {
   flushDiscreteUpdates,
   flushPassiveEffects,
   warnIfNotScopedWithMatchingAct,
+  warnIfUnmockedScheduler,
   IsThisRendererActing,
 } from './ReactFiberWorkLoop';
 import {createUpdate, enqueueUpdate} from './ReactUpdateQueue';
@@ -313,6 +315,7 @@ export function updateContainer(
   if (__DEV__) {
     // $FlowExpectedError - jest isn't a global, and isn't recognized outside of tests
     if ('undefined' !== typeof jest) {
+      warnIfUnmockedScheduler(current);
       warnIfNotScopedWithMatchingAct(current);
     }
   }
@@ -373,6 +376,9 @@ export function findHostInstanceWithNoPortals(
   const hostFiber = findCurrentHostFiberWithNoPortals(fiber);
   if (hostFiber === null) {
     return null;
+  }
+  if (hostFiber.tag === FundamentalComponent) {
+    return hostFiber.stateNode.instance;
   }
   return hostFiber.stateNode;
 }
@@ -501,5 +507,7 @@ export function injectIntoDevTools(devToolsConfig: DevToolsConfig): boolean {
     scheduleRefresh: __DEV__ ? scheduleRefresh : null,
     scheduleRoot: __DEV__ ? scheduleRoot : null,
     setRefreshHandler: __DEV__ ? setRefreshHandler : null,
+    // Enables DevTools to append owner stacks to error messages in DEV mode.
+    getCurrentFiber: __DEV__ ? () => ReactCurrentFiberCurrent : null,
   });
 }

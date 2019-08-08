@@ -25,6 +25,9 @@ import {
   enableProfilerTimer,
   enableSchedulerTracing,
   revertPassiveEffectsChange,
+  warnAboutUnmockedScheduler,
+  flushSuspenseFallbacksInTests,
+  disableSchedulerTimeoutBasedOnReactExpirationTime,
 } from 'shared/ReactFeatureFlags';
 import ReactSharedInternals from 'shared/ReactSharedInternals';
 import invariant from 'shared/invariant';
@@ -38,6 +41,7 @@ import {
   shouldYield,
   requestPaint,
   now,
+  NoPriority,
   ImmediatePriority,
   UserBlockingPriority,
   NormalPriority,
@@ -46,6 +50,9 @@ import {
   flushSyncCallbackQueue,
   scheduleSyncCallback,
 } from './SchedulerWithReactIntegration';
+
+// The scheduler is imported here *only* to detect whether it's been mocked
+import * as Scheduler from 'scheduler';
 
 import {__interactionsRef, __subscriberRef} from 'scheduler/tracing';
 
@@ -232,6 +239,7 @@ let legacyErrorBoundariesThatAlreadyFailed: Set<mixed> | null = null;
 
 let rootDoesHavePassiveEffects: boolean = false;
 let rootWithPendingPassiveEffects: FiberRoot | null = null;
+let pendingPassiveEffectsRenderPriority: ReactPriorityLevel = NoPriority;
 let pendingPassiveEffectsExpirationTime: ExpirationTime = NoWork;
 
 let rootsWithPendingDiscreteUpdates: Map<
@@ -523,7 +531,10 @@ function scheduleCallbackForRoot(
       );
     } else {
       let options = null;
-      if (expirationTime !== Never) {
+      if (
+        !disableSchedulerTimeoutBasedOnReactExpirationTime &&
+        expirationTime !== Never
+      ) {
         let timeout = expirationTimeToMs(expirationTime) - now();
         options = {timeout};
       }
@@ -795,7 +806,7 @@ function prepareFreshStack(root, expirationTime) {
 
   if (__DEV__) {
     ReactStrictModeWarnings.discardPendingWarnings();
-    componentsWithSuspendedDiscreteUpdates = null;
+    componentsThatTriggeredHighPriSuspend = null;
   }
 }
 
@@ -986,7 +997,7 @@ function renderRoot(
     case RootIncomplete: {
       invariant(false, 'Should have a work-in-progress.');
     }
-    // Flow knows about invariant, so it compains if I add a break statement,
+    // Flow knows about invariant, so it complains if I add a break statement,
     // but eslint doesn't know about invariant, so it complains if I do.
     // eslint-disable-next-line no-fallthrough
     case RootErrored: {
@@ -1012,6 +1023,8 @@ function renderRoot(
       return commitRoot.bind(null, root);
     }
     case RootSuspended: {
+      flushSuspensePriorityWarningInDEV();
+
       // We have an acceptable loading state. We need to figure out if we should
       // immediately commit it or wait a bit.
 
@@ -1020,7 +1033,16 @@ function renderRoot(
       // possible.
       const hasNotProcessedNewUpdates =
         workInProgressRootLatestProcessedExpirationTime === Sync;
-      if (hasNotProcessedNewUpdates && !isSync) {
+      if (
+        hasNotProcessedNewUpdates &&
+        !isSync &&
+        // do not delay if we're inside an act() scope
+        !(
+          __DEV__ &&
+          flushSuspenseFallbacksInTests &&
+          IsThisRendererActing.current
+        )
+      ) {
         // If we have not processed any new updates during this pass, then this is
         // either a retry of an existing fallback state or a hidden tree.
         // Hidden trees shouldn't be batched with other work and after that's
@@ -1057,7 +1079,17 @@ function renderRoot(
       return commitRoot.bind(null, root);
     }
     case RootSuspendedWithDelay: {
-      if (!isSync) {
+      flushSuspensePriorityWarningInDEV();
+
+      if (
+        !isSync &&
+        // do not delay if we're inside an act() scope
+        !(
+          __DEV__ &&
+          flushSuspenseFallbacksInTests &&
+          IsThisRendererActing.current
+        )
+      ) {
         // We're suspended in a state that should be avoided. We'll try to avoid committing
         // it for as long as the timeouts let us.
         if (workInProgressRootHasPendingPing) {
@@ -1128,6 +1160,12 @@ function renderRoot(
       // The work completed. Ready to commit.
       if (
         !isSync &&
+        // do not delay if we're inside an act() scope
+        !(
+          __DEV__ &&
+          flushSuspenseFallbacksInTests &&
+          IsThisRendererActing.current
+        ) &&
         workInProgressRootLatestProcessedExpirationTime !== Sync &&
         workInProgressRootCanSuspendUsingConfig !== null
       ) {
@@ -1475,12 +1513,15 @@ function resetChildExpirationTime(completedWork: Fiber) {
 }
 
 function commitRoot(root) {
-  runWithPriority(ImmediatePriority, commitRootImpl.bind(null, root));
+  const renderPriorityLevel = getCurrentPriorityLevel();
+  runWithPriority(
+    ImmediatePriority,
+    commitRootImpl.bind(null, root, renderPriorityLevel),
+  );
   // If there are passive effects, schedule a callback to flush them. This goes
   // outside commitRootImpl so that it inherits the priority of the render.
   if (rootWithPendingPassiveEffects !== null) {
-    const priorityLevel = getCurrentPriorityLevel();
-    scheduleCallback(priorityLevel, () => {
+    scheduleCallback(NormalPriority, () => {
       flushPassiveEffects();
       return null;
     });
@@ -1488,10 +1529,9 @@ function commitRoot(root) {
   return null;
 }
 
-function commitRootImpl(root) {
+function commitRootImpl(root, renderPriorityLevel) {
   flushPassiveEffects();
   flushRenderPhaseStrictModeWarningsInDEV();
-  flushSuspensePriorityWarningInDEV();
 
   invariant(
     (executionContext & (RenderContext | CommitContext)) === NoContext,
@@ -1617,7 +1657,12 @@ function commitRootImpl(root) {
     nextEffect = firstEffect;
     do {
       if (__DEV__) {
-        invokeGuardedCallback(null, commitMutationEffects, null);
+        invokeGuardedCallback(
+          null,
+          commitMutationEffects,
+          null,
+          renderPriorityLevel,
+        );
         if (hasCaughtError()) {
           invariant(nextEffect !== null, 'Should be working on an effect.');
           const error = clearCaughtError();
@@ -1626,7 +1671,7 @@ function commitRootImpl(root) {
         }
       } else {
         try {
-          commitMutationEffects();
+          commitMutationEffects(renderPriorityLevel);
         } catch (error) {
           invariant(nextEffect !== null, 'Should be working on an effect.');
           captureCommitPhaseError(nextEffect, error);
@@ -1712,6 +1757,17 @@ function commitRootImpl(root) {
     rootDoesHavePassiveEffects = false;
     rootWithPendingPassiveEffects = root;
     pendingPassiveEffectsExpirationTime = expirationTime;
+    pendingPassiveEffectsRenderPriority = renderPriorityLevel;
+  } else {
+    // We are done with the effect chain at this point so let's clear the
+    // nextEffect pointers to assist with GC. If we have passive effects, we'll
+    // clear this in flushPassiveEffects.
+    nextEffect = firstEffect;
+    while (nextEffect !== null) {
+      const nextNextEffect = nextEffect.nextEffect;
+      nextEffect.nextEffect = null;
+      nextEffect = nextNextEffect;
+    }
   }
 
   // Check if there's remaining work on this root
@@ -1804,7 +1860,7 @@ function commitBeforeMutationEffects() {
   }
 }
 
-function commitMutationEffects() {
+function commitMutationEffects(renderPriorityLevel) {
   // TODO: Should probably move the bulk of this function to commitWork.
   while (nextEffect !== null) {
     setCurrentDebugFiberInDEV(nextEffect);
@@ -1855,7 +1911,7 @@ function commitMutationEffects() {
         break;
       }
       case Deletion: {
-        commitDeletion(nextEffect);
+        commitDeletion(nextEffect, renderPriorityLevel);
         break;
       }
     }
@@ -1909,9 +1965,19 @@ export function flushPassiveEffects() {
   }
   const root = rootWithPendingPassiveEffects;
   const expirationTime = pendingPassiveEffectsExpirationTime;
+  const renderPriorityLevel = pendingPassiveEffectsRenderPriority;
   rootWithPendingPassiveEffects = null;
   pendingPassiveEffectsExpirationTime = NoWork;
+  pendingPassiveEffectsRenderPriority = NoPriority;
+  const priorityLevel =
+    renderPriorityLevel > NormalPriority ? NormalPriority : renderPriorityLevel;
+  return runWithPriority(
+    priorityLevel,
+    flushPassiveEffectsImpl.bind(null, root, expirationTime),
+  );
+}
 
+function flushPassiveEffectsImpl(root, expirationTime) {
   let prevInteractions: Set<Interaction> | null = null;
   if (enableSchedulerTracing) {
     prevInteractions = __interactionsRef.current;
@@ -1947,7 +2013,10 @@ export function flushPassiveEffects() {
         captureCommitPhaseError(effect, error);
       }
     }
-    effect = effect.nextEffect;
+    const nextNextEffect = effect.nextEffect;
+    // Remove nextEffect pointer to assist GC
+    effect.nextEffect = null;
+    effect = nextNextEffect;
   }
 
   if (enableSchedulerTracing) {
@@ -2247,11 +2316,10 @@ function checkForNestedUpdates() {
 
 function flushRenderPhaseStrictModeWarningsInDEV() {
   if (__DEV__) {
-    ReactStrictModeWarnings.flushPendingUnsafeLifecycleWarnings();
     ReactStrictModeWarnings.flushLegacyContextWarning();
 
     if (warnAboutDeprecatedLifecycles) {
-      ReactStrictModeWarnings.flushPendingDeprecationWarnings();
+      ReactStrictModeWarnings.flushPendingUnsafeLifecycleWarnings();
     }
   }
 }
@@ -2421,6 +2489,7 @@ function warnAboutInvalidUpdatesOnClassComponentsInDEV(fiber) {
   }
 }
 
+// a 'shared' variable that changes when act() opens/closes in tests.
 export const IsThisRendererActing = {current: (false: boolean)};
 
 export function warnIfNotScopedWithMatchingAct(fiber: Fiber): void {
@@ -2436,12 +2505,12 @@ export function warnIfNotScopedWithMatchingAct(fiber: Fiber): void {
           'Be sure to use the matching version of act() corresponding to your renderer:\n\n' +
           '// for react-dom:\n' +
           "import {act} from 'react-dom/test-utils';\n" +
-          '//...\n' +
+          '// ...\n' +
           'act(() => ...);\n\n' +
           '// for react-test-renderer:\n' +
           "import TestRenderer from 'react-test-renderer';\n" +
           'const {act} = TestRenderer;\n' +
-          '//...\n' +
+          '// ...\n' +
           'act(() => ...);' +
           '%s',
         getStackByFiberInDevAndProd(fiber),
@@ -2508,37 +2577,129 @@ function warnIfNotCurrentlyActingUpdatesInDEV(fiber: Fiber): void {
 
 export const warnIfNotCurrentlyActingUpdatesInDev = warnIfNotCurrentlyActingUpdatesInDEV;
 
-let componentsWithSuspendedDiscreteUpdates = null;
-export function checkForWrongSuspensePriorityInDEV(sourceFiber: Fiber) {
+// In tests, we want to enforce a mocked scheduler.
+let didWarnAboutUnmockedScheduler = false;
+// TODO Before we release concurrent mode, revisit this and decide whether a mocked
+// scheduler is the actual recommendation. The alternative could be a testing build,
+// a new lib, or whatever; we dunno just yet. This message is for early adopters
+// to get their tests right.
+
+export function warnIfUnmockedScheduler(fiber: Fiber) {
   if (__DEV__) {
     if (
-      (sourceFiber.mode & ConcurrentMode) !== NoEffect &&
-      // Check if we're currently rendering a discrete update. Ideally, all we
-      // would need to do is check the current priority level. But we currently
-      // have no rigorous way to distinguish work that was scheduled at user-
-      // blocking priority from work that expired a bit and was "upgraded" to
-      // a higher priority. That's because we don't schedule separate callbacks
-      // for every level, only the highest priority level per root. The priority
-      // of subsequent levels is inferred from the expiration time, but this is
-      // an imprecise heuristic.
-      //
-      // However, we do store the last discrete pending update per root. So we
-      // can reliably compare to that one. (If we broaden this warning to include
-      // high pri updates that aren't discrete, then this won't be sufficient.)
-      //
-      // My rationale is that it's better for this warning to have false
-      // negatives than false positives.
-      rootsWithPendingDiscreteUpdates !== null &&
-      workInProgressRoot !== null &&
-      renderExpirationTime ===
-        rootsWithPendingDiscreteUpdates.get(workInProgressRoot)
+      didWarnAboutUnmockedScheduler === false &&
+      Scheduler.unstable_flushAllWithoutAsserting === undefined
     ) {
-      // Add the component name to a set.
-      const componentName = getComponentName(sourceFiber.type);
-      if (componentsWithSuspendedDiscreteUpdates === null) {
-        componentsWithSuspendedDiscreteUpdates = new Set([componentName]);
-      } else {
-        componentsWithSuspendedDiscreteUpdates.add(componentName);
+      if (fiber.mode & BatchedMode || fiber.mode & ConcurrentMode) {
+        didWarnAboutUnmockedScheduler = true;
+        warningWithoutStack(
+          false,
+          'In Concurrent or Sync modes, the "scheduler" module needs to be mocked ' +
+            'to guarantee consistent behaviour across tests and browsers. ' +
+            'For example, with jest: \n' +
+            "jest.mock('scheduler', () => require('scheduler/unstable_mock'));\n\n" +
+            'For more info, visit https://fb.me/react-mock-scheduler',
+        );
+      } else if (warnAboutUnmockedScheduler === true) {
+        didWarnAboutUnmockedScheduler = true;
+        warningWithoutStack(
+          false,
+          'Starting from React v17, the "scheduler" module will need to be mocked ' +
+            'to guarantee consistent behaviour across tests and browsers. ' +
+            'For example, with jest: \n' +
+            "jest.mock('scheduler', () => require('scheduler/unstable_mock'));\n\n" +
+            'For more info, visit https://fb.me/react-mock-scheduler',
+        );
+      }
+    }
+  }
+}
+
+let componentsThatTriggeredHighPriSuspend = null;
+export function checkForWrongSuspensePriorityInDEV(sourceFiber: Fiber) {
+  if (__DEV__) {
+    const currentPriorityLevel = getCurrentPriorityLevel();
+    if (
+      (sourceFiber.mode & ConcurrentMode) !== NoEffect &&
+      (currentPriorityLevel === UserBlockingPriority ||
+        currentPriorityLevel === ImmediatePriority)
+    ) {
+      let workInProgressNode = sourceFiber;
+      while (workInProgressNode !== null) {
+        // Add the component that triggered the suspense
+        const current = workInProgressNode.alternate;
+        if (current !== null) {
+          // TODO: warn component that triggers the high priority
+          // suspend is the HostRoot
+          switch (workInProgressNode.tag) {
+            case ClassComponent:
+              // Loop through the component's update queue and see whether the component
+              // has triggered any high priority updates
+              const updateQueue = current.updateQueue;
+              if (updateQueue !== null) {
+                let update = updateQueue.firstUpdate;
+                while (update !== null) {
+                  const priorityLevel = update.priority;
+                  if (
+                    priorityLevel === UserBlockingPriority ||
+                    priorityLevel === ImmediatePriority
+                  ) {
+                    if (componentsThatTriggeredHighPriSuspend === null) {
+                      componentsThatTriggeredHighPriSuspend = new Set([
+                        getComponentName(workInProgressNode.type),
+                      ]);
+                    } else {
+                      componentsThatTriggeredHighPriSuspend.add(
+                        getComponentName(workInProgressNode.type),
+                      );
+                    }
+                    break;
+                  }
+                  update = update.next;
+                }
+              }
+              break;
+            case FunctionComponent:
+            case ForwardRef:
+            case SimpleMemoComponent:
+              if (
+                workInProgressNode.memoizedState !== null &&
+                workInProgressNode.memoizedState.baseUpdate !== null
+              ) {
+                let update = workInProgressNode.memoizedState.baseUpdate;
+                // Loop through the functional component's memoized state to see whether
+                // the component has triggered any high pri updates
+                while (update !== null) {
+                  const priority = update.priority;
+                  if (
+                    priority === UserBlockingPriority ||
+                    priority === ImmediatePriority
+                  ) {
+                    if (componentsThatTriggeredHighPriSuspend === null) {
+                      componentsThatTriggeredHighPriSuspend = new Set([
+                        getComponentName(workInProgressNode.type),
+                      ]);
+                    } else {
+                      componentsThatTriggeredHighPriSuspend.add(
+                        getComponentName(workInProgressNode.type),
+                      );
+                    }
+                    break;
+                  }
+                  if (
+                    update.next === workInProgressNode.memoizedState.baseUpdate
+                  ) {
+                    break;
+                  }
+                  update = update.next;
+                }
+              }
+              break;
+            default:
+              break;
+          }
+        }
+        workInProgressNode = workInProgressNode.return;
       }
     }
   }
@@ -2546,34 +2707,28 @@ export function checkForWrongSuspensePriorityInDEV(sourceFiber: Fiber) {
 
 function flushSuspensePriorityWarningInDEV() {
   if (__DEV__) {
-    if (componentsWithSuspendedDiscreteUpdates !== null) {
+    if (componentsThatTriggeredHighPriSuspend !== null) {
       const componentNames = [];
-      componentsWithSuspendedDiscreteUpdates.forEach(name => {
-        componentNames.push(name);
-      });
-      componentsWithSuspendedDiscreteUpdates = null;
-
-      // TODO: A more helpful version of this message could include the names of
-      // the component that were updated, not the ones that suspended. To do
-      // that we'd need to track all the components that updated during this
-      // render, perhaps using the same mechanism as `markRenderEventTime`.
-      warningWithoutStack(
-        false,
-        'The following components suspended during a user-blocking update: %s' +
-          '\n\n' +
-          'Updates triggered by user interactions (e.g. click events) are ' +
-          'considered user-blocking by default. They should not suspend. ' +
-          'Updates that can afford to take a bit longer should be wrapped ' +
-          'with `Scheduler.next` (or an equivalent abstraction). This ' +
-          'typically includes any update that shows new content, like ' +
-          'a navigation.' +
-          '\n\n' +
-          'Generally, you should split user interactions into at least two ' +
-          'seprate updates: a user-blocking update to provide immediate ' +
-          'feedback, and another update to perform the actual change.',
-        // TODO: Add link to React docs with more information, once it exists
-        componentNames.sort().join(', '),
+      componentsThatTriggeredHighPriSuspend.forEach(name =>
+        componentNames.push(name),
       );
+      componentsThatTriggeredHighPriSuspend = null;
+
+      if (componentNames.length > 0) {
+        warningWithoutStack(
+          false,
+          '%s triggered a user-blocking update that suspended.' +
+            '\n\n' +
+            'The fix is to split the update into multiple parts: a user-blocking ' +
+            'update to provide immediate feedback, and another update that ' +
+            'triggers the bulk of the changes.' +
+            '\n\n' +
+            'Refer to the documentation for useSuspenseTransition to learn how ' +
+            'to implement this pattern.',
+          // TODO: Add link to React docs with more information, once it exists
+          componentNames.sort().join(', '),
+        );
+      }
     }
   }
 }

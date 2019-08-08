@@ -19,16 +19,13 @@ import {
   SuspenseComponent,
   SuspenseListComponent,
   DehydratedSuspenseComponent,
-  EventComponent,
 } from 'shared/ReactWorkTags';
 import {DidCapture, NoEffect, ShouldCapture} from 'shared/ReactSideEffectTags';
-import {
-  enableSuspenseServerRenderer,
-  enableFlareAPI,
-} from 'shared/ReactFeatureFlags';
+import {enableSuspenseServerRenderer} from 'shared/ReactFeatureFlags';
 
 import {popHostContainer, popHostContext} from './ReactFiberHostContext';
 import {popSuspenseContext} from './ReactFiberSuspenseContext';
+import {resetHydrationState} from './ReactFiberHydrationContext';
 import {
   isContextProvider as isLegacyContextProvider,
   popContext as popLegacyContext,
@@ -84,8 +81,12 @@ function unwindWork(
     }
     case DehydratedSuspenseComponent: {
       if (enableSuspenseServerRenderer) {
-        // TODO: popHydrationState
         popSuspenseContext(workInProgress);
+        if (workInProgress.alternate === null) {
+          // TODO: popHydrationState
+        } else {
+          resetHydrationState();
+        }
         const effectTag = workInProgress.effectTag;
         if (effectTag & ShouldCapture) {
           workInProgress.effectTag = (effectTag & ~ShouldCapture) | DidCapture;
@@ -106,11 +107,6 @@ function unwindWork(
       return null;
     case ContextProvider:
       popProvider(workInProgress);
-      return null;
-    case EventComponent:
-      if (enableFlareAPI) {
-        popHostContext(workInProgress);
-      }
       return null;
     default:
       return null;
@@ -143,7 +139,6 @@ function unwindInterruptedWork(interruptedWork: Fiber) {
       break;
     case DehydratedSuspenseComponent:
       if (enableSuspenseServerRenderer) {
-        // TODO: popHydrationState
         popSuspenseContext(interruptedWork);
       }
       break;
@@ -152,11 +147,6 @@ function unwindInterruptedWork(interruptedWork: Fiber) {
       break;
     case ContextProvider:
       popProvider(interruptedWork);
-      break;
-    case EventComponent:
-      if (enableFlareAPI) {
-        popHostContext(interruptedWork);
-      }
       break;
     default:
       break;

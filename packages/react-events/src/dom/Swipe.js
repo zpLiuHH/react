@@ -8,14 +8,25 @@
  */
 
 import type {
-  ReactDOMEventResponder,
   ReactDOMResponderEvent,
   ReactDOMResponderContext,
 } from 'shared/ReactDOMTypes';
-import type {EventPriority} from 'shared/ReactTypes';
+import type {
+  EventPriority,
+  ReactEventResponderListener,
+} from 'shared/ReactTypes';
 
 import React from 'react';
 import {UserBlockingEvent, DiscreteEvent} from 'shared/ReactTypes';
+
+type SwipeProps = {
+  disabled: boolean,
+  shouldClaimOwnership: () => boolean,
+  onSwipeMove: (e: SwipeEvent) => void,
+  onSwipeEnd: (e: SwipeEvent) => void,
+  onSwipeLeft: (e: SwipeEvent) => void,
+  onSwipeRight: (e: SwipeEvent) => void,
+};
 
 const targetEventTypes = ['pointerdown'];
 const rootEventTypes = ['pointerup', 'pointercancel', 'pointermove_active'];
@@ -47,6 +58,10 @@ type SwipeEvent = {|
   diffY?: number,
 |};
 
+function isFunction(obj): boolean {
+  return typeof obj === 'function';
+}
+
 function createSwipeEvent(
   context: ReactDOMResponderContext,
   type: SwipeEventType,
@@ -65,8 +80,8 @@ function createSwipeEvent(
 
 function dispatchSwipeEvent(
   context: ReactDOMResponderContext,
-  name: SwipeEventType,
   listener: SwipeEvent => void,
+  name: SwipeEventType,
   state: SwipeState,
   eventPriority: EventPriority,
   eventData?: EventData,
@@ -86,10 +101,10 @@ type SwipeState = {
   swipeTarget: null | Element | Document,
   x: number,
   y: number,
+  ownershipClaimed: boolean,
 };
 
-const SwipeResponder: ReactDOMEventResponder = {
-  displayName: 'Scroll',
+const swipeResponderImpl = {
   targetEventTypes,
   getInitialState(): SwipeState {
     return {
@@ -102,12 +117,13 @@ const SwipeResponder: ReactDOMEventResponder = {
       swipeTarget: null,
       x: 0,
       y: 0,
+      ownershipClaimed: false,
     };
   },
   onEvent(
     event: ReactDOMResponderEvent,
     context: ReactDOMResponderContext,
-    props: Object,
+    props: SwipeProps,
     state: SwipeState,
   ): void {
     const {target, type, nativeEvent} = event;
@@ -127,8 +143,11 @@ const SwipeResponder: ReactDOMEventResponder = {
 
           let shouldEnableSwiping = true;
 
-          if (props.onShouldClaimOwnership && props.onShouldClaimOwnership()) {
+          if (props.shouldClaimOwnership && props.shouldClaimOwnership()) {
             shouldEnableSwiping = context.requestGlobalOwnership();
+            if (shouldEnableSwiping) {
+              state.ownershipClaimed = true;
+            }
           }
           if (shouldEnableSwiping) {
             state.isSwiping = true;
@@ -149,7 +168,7 @@ const SwipeResponder: ReactDOMEventResponder = {
   onRootEvent(
     event: ReactDOMResponderEvent,
     context: ReactDOMResponderContext,
-    props: Object,
+    props: SwipeProps,
     state: SwipeState,
   ): void {
     const {type, nativeEvent} = event;
@@ -183,28 +202,30 @@ const SwipeResponder: ReactDOMEventResponder = {
           }
           const x = (obj: any).screenX;
           const y = (obj: any).screenY;
-          if (x < state.x && props.onSwipeLeft) {
+          if (x < state.x) {
             state.direction = 3;
-          } else if (x > state.x && props.onSwipeRight) {
+          } else if (x > state.x) {
             state.direction = 1;
           }
           state.x = x;
           state.y = y;
-          if (props.onSwipeMove) {
-            const eventData = {
-              diffX: x - state.startX,
-              diffY: y - state.startY,
-            };
+          const eventData = {
+            diffX: x - state.startX,
+            diffY: y - state.startY,
+          };
+          const onSwipeMove = props.onSwipeMove;
+
+          if (isFunction(onSwipeMove)) {
             dispatchSwipeEvent(
               context,
+              onSwipeMove,
               'swipemove',
-              props.onSwipeMove,
               state,
               UserBlockingEvent,
               eventData,
             );
-            (nativeEvent: any).preventDefault();
           }
+          (nativeEvent: any).preventDefault();
         }
         break;
       }
@@ -217,35 +238,45 @@ const SwipeResponder: ReactDOMEventResponder = {
           if (state.x === state.startX && state.y === state.startY) {
             return;
           }
-          if (props.onShouldClaimOwnership) {
+          if (state.ownershipClaimed) {
             context.releaseOwnership();
           }
           const direction = state.direction;
           const lastDirection = state.lastDirection;
           if (direction !== lastDirection) {
-            if (props.onSwipeLeft && direction === 3) {
-              dispatchSwipeEvent(
-                context,
-                'swipeleft',
-                props.onSwipeLeft,
-                state,
-                DiscreteEvent,
-              );
-            } else if (props.onSwipeRight && direction === 1) {
-              dispatchSwipeEvent(
-                context,
-                'swiperight',
-                props.onSwipeRight,
-                state,
-                DiscreteEvent,
-              );
+            if (direction === 3) {
+              const onSwipeLeft = props.onSwipeLeft;
+
+              if (isFunction(onSwipeLeft)) {
+                dispatchSwipeEvent(
+                  context,
+                  onSwipeLeft,
+                  'swipeleft',
+                  state,
+                  DiscreteEvent,
+                );
+              }
+            } else if (direction === 1) {
+              const onSwipeRight = props.onSwipeRight;
+
+              if (isFunction(onSwipeRight)) {
+                dispatchSwipeEvent(
+                  context,
+                  onSwipeRight,
+                  'swiperight',
+                  state,
+                  DiscreteEvent,
+                );
+              }
             }
           }
-          if (props.onSwipeEnd) {
+          const onSwipeEnd = props.onSwipeEnd;
+
+          if (isFunction(onSwipeEnd)) {
             dispatchSwipeEvent(
               context,
+              onSwipeEnd,
               'swipeend',
-              props.onSwipeEnd,
               state,
               DiscreteEvent,
             );
@@ -262,8 +293,13 @@ const SwipeResponder: ReactDOMEventResponder = {
   },
 };
 
-export const Swipe = React.unstable_createEvent(SwipeResponder);
+export const SwipeResponder = React.unstable_createResponder(
+  'Swipe',
+  swipeResponderImpl,
+);
 
-export function useSwipe(props: Object): void {
-  React.unstable_useEvent(Swipe, props);
+export function useSwipeListener(
+  props: SwipeProps,
+): ReactEventResponderListener<any, any> {
+  return React.unstable_useListener(SwipeResponder, props);
 }

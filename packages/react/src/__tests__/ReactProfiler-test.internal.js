@@ -126,9 +126,7 @@ describe('Profiler', () => {
           if (__DEV__ && enableProfilerTimer) {
             it('should warn if required params are missing', () => {
               expect(() => {
-                expect(() => {
-                  ReactTestRenderer.create(<React.Profiler />);
-                }).toThrow('onRender is not a function');
+                ReactTestRenderer.create(<React.Profiler />);
               }).toWarnDev(
                 'Profiler must specify an "id" string and "onRender" function as props',
                 {withoutStack: true},
@@ -2628,7 +2626,7 @@ describe('Profiler', () => {
       });
 
       it('handles high-pri renderers between suspended and resolved (async) trees', async () => {
-        // Set up an initial shell. We need to set this up before the test scenario
+        // Set up an initial shell. We need to set this up before the test sceanrio
         // because we want initial render to suspend on navigation to the initial state.
         let renderer = ReactTestRenderer.create(
           <React.Profiler id="app" onRender={() => {}}>
